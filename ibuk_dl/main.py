@@ -5,18 +5,17 @@ import logging
 import re
 import sys
 import os
-
 import requests
 import websockets
 from bs4 import BeautifulSoup, Tag
-
-
+import glob
+import shutil
+import concurrent.futures
+from pyppeteer import launch
+from pypdf import PdfWriter
 from .yeast import yeast
 
 
-# ----------------------
-# Book Metadata & Other Classes (Unchanged, collapsed for brevity)
-# ----------------------
 class BookMetadata:
     def __init__(self, data) -> None:
         self._data = data
@@ -30,7 +29,6 @@ class BookMetadata:
         self.description: str = data.get("review", "No description available.")
         self.cover_url: str | None = data['covers'][0]['jpg_location'] if data.get('covers') else None
 
-
 class IbukWebSession(requests.Session):
     def __init__(self, username=None, password=None, use_firefox_cookies=False, use_pw=False):
         super().__init__()
@@ -42,7 +40,6 @@ class IbukWebSession(requests.Session):
         
         if self._use_firefox_cookies:
             try:
-                # Use a different name for the import to avoid conflict with the function
                 import browser_cookie3 as bc
                 self._load_firefox_cookies(bc)
             except ImportError:
@@ -98,9 +95,7 @@ class IbukWebSession(requests.Session):
         r = self.get("http://eczyt.bg.pw.edu.pl/han/ibuk/https/libra.ibuk.pl/")
         r.raise_for_status()
         
-        # Verify if we got the cookie
         if "ilApiKey" not in self.cookies:
-              # Try one more hit just in case
               self.get("https://libra.ibuk.pl/")
 
     def api_key(self) -> str:
@@ -112,7 +107,6 @@ class IbukWebSession(requests.Session):
             else:
                 self.login()
         else:
-            # Only visit homepage if likely not logged in or rely on cookies
             r = self.get("https://libra.ibuk.pl/")
             r.raise_for_status()
             
@@ -140,7 +134,6 @@ class IbukWebSocketSession:
     async def _connect(self):
         sid = self._create_session()
         ws_url = f"wss://{self._socket_io_base_url}/?apiKey={self._api_key}&isServer=0&EIO=4&transport=websocket&sid={sid}"
-        # Correctly connect without extra headers, per user's working version
         self.ws = await websockets.connect(ws_url, max_size=None)
         await self._hello()
 
@@ -198,23 +191,8 @@ class IbukWebSocketSession:
         fonts = json.loads(json.loads(r.split("42/books,")[1])[1])["html"]
         return re.sub("; format", " format", fonts)
 
-
-# ----------------------
-# Ebook Generation & Actions (Unchanged)
-# ----------------------
 def clean_page_html(html_content: str) -> str:
-    """
-    Cleans the HTML content by replacing empty spans (often used for spacing) with whitespace.
-    This fixes the issue where words run together because layout-based spacing (empty spans with width)
-    is ignored during conversion.
-    """
-    # Replace empty spans <span ...></span> with a single space.
-    # This handles both style-based spacers and class-based spacers (e.g. class="s5").
     return re.sub(r'<span[^>]*>\s*</span>', ' ', html_content)
-
-
-
-
 
 async def perform_download_action(url: str, page_count: int | None, ibs: IbukWebSession, output_dir: str | None,
                                   no_cover: bool):
@@ -260,20 +238,7 @@ async def perform_download_action(url: str, page_count: int | None, ibs: IbukWeb
     logging.info(f"Book info saved to: '{output_dir}'")
     return output_dir
 
-
-import glob
-import shutil
-import concurrent.futures
-from pyppeteer import launch
-from pypdf import PdfWriter
-
-
 def is_html_empty(file_path):
-    """
-    Uses BeautifulSoup to check if an HTML file's body has any visible text CONTENT
-    OR images/svgs/canvas/video.
-    Returns True if the body is effectively empty.
-    """
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             soup = BeautifulSoup(f, 'lxml')
@@ -281,14 +246,10 @@ def is_html_empty(file_path):
         if not soup.body:
             return True
 
-        # Check for text
         text = soup.body.get_text(strip=True)
-        
-        # Check for content elements
         media = soup.body.find_all(['img', 'svg', 'image', 'iframe', 'canvas', 'embed', 'video'])
 
         if text == "" and not media:
-            # aggressive check: look for background-images in inline styles
             for tag in soup.body.find_all(True):
                 style = tag.get('style')
                 if style and 'url(' in style:
@@ -301,9 +262,6 @@ def is_html_empty(file_path):
 
 
 async def convert_single_page(semaphore, browser, input_path, temp_dir, style_content, font_content, progress_info):
-    """
-    Converts a single HTML file using an existing browser instance.
-    """
     async with semaphore:
         page = None
         try:
@@ -314,16 +272,13 @@ async def convert_single_page(semaphore, browser, input_path, temp_dir, style_co
 
             page = await browser.newPage()
             
-            # Navigate
             await page.goto(full_path, {'waitUntil': 'load', 'timeout': 30000})
 
-            # Inject CSS
             if font_content:
                 await page.addStyleTag({'content': font_content})
             if style_content:
                 await page.addStyleTag({'content': style_content})
 
-            # Render PDF - reduced margin to 0
             await page.pdf({
                 'path': pdf_path,
                 'format': 'A4',
@@ -333,7 +288,6 @@ async def convert_single_page(semaphore, browser, input_path, temp_dir, style_co
             
             await page.close()
             
-            # Update and log progress
             current = progress_info['current'] = progress_info['current'] + 1
             total = progress_info['total']
             print(f"[{current}/{total}] Converted: {basename}")
@@ -351,9 +305,6 @@ async def convert_single_page(semaphore, browser, input_path, temp_dir, style_co
 
 
 def merge_pdfs(pdf_parts, output_path):
-    """
-    Merges a list of PDF files.
-    """
     if not pdf_parts:
         print("No PDF parts were created. Aborting merge.")
         return
@@ -362,15 +313,13 @@ def merge_pdfs(pdf_parts, output_path):
     merger = PdfWriter()
     for pdf_part in pdf_parts:
         try:
-            # Append the first page only
             merger.append(pdf_part, pages=(0, 1))
         except Exception as e:
             print(f"Warning: Could not merge {pdf_part}: {e}")
 
     merger.write(output_path)
     merger.close()
-    print(f"✅ Success! Merged PDF saved to: {output_path}")
-
+    print(f"Merged PDF saved to: {output_path}")
 
 async def perform_convert_action(source_dir: str, output_file: str | None, format: str, cleanup: bool = False):
     logging.info(f"Action: Convert data from '{source_dir}' to '{format}'")
@@ -390,7 +339,6 @@ async def perform_convert_action(source_dir: str, output_file: str | None, forma
         base_fn = re.sub(r'[<>:"/\\|?*]', '', f"{book_metadata.author} - {book_metadata.title}").strip()
         output_file = f"{base_fn}.{format}"
 
-    # Load CSS
     style, fonts = '', ''
     try:
         with open(os.path.join(source_dir, "style.css"), "r", encoding="utf-8") as f: style = f.read()
@@ -404,9 +352,6 @@ async def perform_convert_action(source_dir: str, output_file: str | None, forma
         with open(cover_path, 'rb') as f: cover_data = f.read()
 
     if format == 'pdf':
-        # PDF Conversion Logic (Optimized)
-        
-        # Try to find chrome
         executable_path = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
         if not os.path.exists(executable_path):
              executable_path = "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
@@ -422,7 +367,6 @@ async def perform_convert_action(source_dir: str, output_file: str | None, forma
             logging.error(f"No .html files found in '{html_dir}'")
             return
 
-        # Sort
         try:
             html_files = sorted(html_files, key=lambda f: int(os.path.basename(f).split('.')[0]))
         except ValueError:
@@ -438,7 +382,6 @@ async def perform_convert_action(source_dir: str, output_file: str | None, forma
             if not is_empty:
                 valid_html_files.append(file)
             else:
-                 # Optional: log skipped
                  pass
 
         total_files = len(valid_html_files)
@@ -462,7 +405,6 @@ async def perform_convert_action(source_dir: str, output_file: str | None, forma
         
         merge_pdfs(pdf_parts, output_file)
         
-        # Cleanup
         for part in pdf_parts:
             try: os.remove(part)
             except: pass
@@ -470,12 +412,9 @@ async def perform_convert_action(source_dir: str, output_file: str | None, forma
         except: pass
 
     else:
-        # HTML (Original Logic)
         pages_html = []
         num_pages = manifest.get('num_pages_downloaded', 0)
-        # Fallback if manual run
         if num_pages == 0:
-             # Just count files
              num_pages = len(glob.glob(os.path.join(html_dir, "*.html")))
 
         for i in range(1, num_pages + 1):
@@ -495,23 +434,16 @@ async def perform_convert_action(source_dir: str, output_file: str | None, forma
         logging.info(f"Successfully created {output_file}")
     
     if cleanup:
-        # Safety check: ensure output_file is not inside source_dir
         abs_source = os.path.abspath(source_dir)
         abs_output = os.path.abspath(output_file)
-        # Use commonpath to correctly determine if output is inside source (avoids 'folder.pdf' matches 'folder')
-        # or just ensure path ends with separator
         try:
-             # os.path.commonpath raises ValueError on Windows if drives match but paths different relative mixes? 
-             # no, abspath handles it.
-             # but easiest fix: append os.sep to source
              source_prefix = abs_source + os.sep
              if abs_output.startswith(source_prefix):
                  logging.warning(f"Output file '{output_file}' is inside source directory '{source_dir}'. Skipping cleanup to avoid deleting the result.")
-                 return # Exit cleanup block
+                 return
         except Exception:
              pass 
 
-        # If we are here, it's safe (or at least check passed)
         logging.info(f"Cleaning up source directory: {source_dir}")
         try:
             shutil.rmtree(source_dir)
@@ -520,7 +452,6 @@ async def perform_convert_action(source_dir: str, output_file: str | None, forma
 
 
 def perform_query_action(url: str, ibs: IbukWebSession):
-    # This function remains unchanged and correct
     logging.info("Action: Query Book Metadata")
     book_metadata = ibs.get_book_metadata(url)
     print("-" * 20);
@@ -530,12 +461,7 @@ def perform_query_action(url: str, ibs: IbukWebSession):
     print(f"Cover URL:   {book_metadata.cover_url}");
     print("-" * 20)
 
-
-# ----------------------
-# Main
-# ----------------------
 async def main():
-    # The argparse setup is correct from the last version
     parser = argparse.ArgumentParser(prog="ibuk-dl", description="Download and convert books from libra.ibuk.pl.",
                                      epilog="Example: ibuk-dl https://path/to/book")
     parser.add_argument("--convert", metavar="SOURCE_DIR", help="Convert data from SOURCE_DIR into an EPUB/HTML file.")
@@ -573,14 +499,11 @@ async def main():
             logging.error(f"Query error: {e}", exc_info=False); sys.exit(1)
 
     elif action == 'convert':
-        # The 'convert' action does not involve api_key and is correct.
         source_dir = args.convert
         if not source_dir:
-            # A bit of logic to allow `ibuk-dl --convert my-dir` to work as expected
             if args.url_or_dir and os.path.isdir(args.url_or_dir):
                 source_dir = args.url_or_dir
             elif args.url_or_dir:
-                # If user passed a URL but meant convert, we can't do much unless it's a dir
                  logging.error("A source directory must be provided with --convert.");
                  parser.print_help();
                  sys.exit(1)
@@ -595,7 +518,7 @@ async def main():
             "A book URL is required for download action."); parser.print_help(); sys.exit(1)
         try:
             ibs = IbukWebSession(username=args.username, password=args.password, use_firefox_cookies=args.firefox_cookies, use_pw=args.pw)
-            ibs.api_key()  # REMOVED await
+            ibs.api_key()
             output_dir = await perform_download_action(args.url_or_dir, args.page_count, ibs, args.output, args.no_cover)
             
             if output_dir and not args.no_convert:
@@ -607,11 +530,9 @@ async def main():
         except Exception as e:
             logging.error(f"Download error: {e}", exc_info=False); sys.exit(1)
 
-
 def run_main():
     if sys.platform == "win32": asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
     asyncio.run(main())
-
 
 if __name__ == "__main__":
     run_main()
