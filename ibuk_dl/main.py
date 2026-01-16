@@ -32,12 +32,14 @@ class BookMetadata:
 
 
 class IbukWebSession(requests.Session):
-    def __init__(self, username=None, password=None, use_firefox_cookies=False):
+    def __init__(self, username=None, password=None, use_firefox_cookies=False, use_pw=False):
         super().__init__()
         self._api_key = None
         self._username = username
         self._password = password
         self._use_firefox_cookies = use_firefox_cookies
+        self._use_pw = use_pw
+        
         if self._use_firefox_cookies:
             try:
                 # Use a different name for the import to avoid conflict with the function
@@ -66,11 +68,49 @@ class IbukWebSession(requests.Session):
         r = self.post("https://libra.ibuk.pl/credentials/login-bsr", json=payload)
         r.raise_for_status()
 
+    def login_pw(self, username, password):
+        logging.info("Logging in with PW (Politechnika Warszawska)...")
+        data = {
+            "func": "login",
+            "calling_system": "han",
+            "term1": "short",
+            "url": "http://eczyt.bg.pw.edu.pl/pds/x",
+            "selfreg": "",
+            "bor_id": username,
+            "bor_verification": password,
+            "institute": "WTU50",
+        }
+        r = self.post("https://gate.bg.pw.edu.pl/pds", data=data)
+
+        match = re.search(r"PDS_HANDLE = (\d+)", r.text)
+        if not match:
+             logging.error("Could not find PDS_HANDLE in PW login response. Authentication failed?")
+             raise RuntimeError("PW Login Failed: PDS_HANDLE not found")
+        
+        pds = match.group(1)
+
+        r = self.get(
+            f"http://eczyt.bg.pw.edu.pl/pds/x?=&selfreg=&bor_id={username}&bor_verification={password}&institute=WTU50&pds_handle={pds}"
+        )
+        if r.status_code != 302 and r.status_code != 200:
+             pass
+
+        r = self.get("http://eczyt.bg.pw.edu.pl/han/ibuk/https/libra.ibuk.pl/")
+        r.raise_for_status()
+        
+        # Verify if we got the cookie
+        if "ilApiKey" not in self.cookies:
+              # Try one more hit just in case
+              self.get("https://libra.ibuk.pl/")
+
     def api_key(self) -> str:
         if self._api_key: return self._api_key
         
         if self._username and self._password:
-            self.login()
+            if self._use_pw:
+                self.login_pw(self._username, self._password)
+            else:
+                self.login()
         else:
             # Only visit homepage if likely not logged in or rely on cookies
             r = self.get("https://libra.ibuk.pl/")
@@ -506,7 +546,9 @@ async def main():
     parser.add_argument("--format", default="pdf", choices=['html', 'pdf'], help="Output format for conversion.")
     parser.add_argument("--no-cover", action="store_true", help="Do not download or embed the book cover.")
     parser.add_argument("--no-convert", action="store_true", help="Skip automatic conversion after download.")
+    parser.add_argument("--keep", action="store_true", help="Keep source files (HTML/CSS) after conversion.")
     parser.add_argument("--firefox-cookies", action="store_true", help="Use Firefox cookies for authentication.")
+    parser.add_argument("--pw", action="store_true", help="Use Politechnika Warszawska (PW) authentication.")
     parser.add_argument("-u", "--username", help="Email for login.")
     parser.add_argument("-p", "--password", help="Password for login.")
 
@@ -524,7 +566,7 @@ async def main():
         if not args.url_or_dir or not args.url_or_dir.startswith("http"): logging.error(
             "A URL is required for --query action."); parser.print_help(); sys.exit(1)
         try:
-            ibs = IbukWebSession(username=args.username, password=args.password, use_firefox_cookies=args.firefox_cookies)
+            ibs = IbukWebSession(username=args.username, password=args.password, use_firefox_cookies=args.firefox_cookies, use_pw=args.pw)
             ibs.api_key()  # REMOVED await
             await perform_query_action(args.url_or_dir, ibs)
         except Exception as e:
@@ -552,7 +594,7 @@ async def main():
         if not args.url_or_dir or not args.url_or_dir.startswith("http"): logging.error(
             "A book URL is required for download action."); parser.print_help(); sys.exit(1)
         try:
-            ibs = IbukWebSession(username=args.username, password=args.password, use_firefox_cookies=args.firefox_cookies)
+            ibs = IbukWebSession(username=args.username, password=args.password, use_firefox_cookies=args.firefox_cookies, use_pw=args.pw)
             ibs.api_key()  # REMOVED await
             output_dir = await perform_download_action(args.url_or_dir, args.page_count, ibs, args.output, args.no_cover)
             
@@ -560,7 +602,7 @@ async def main():
                 print("\n" + "="*40)
                 logging.info(f"Download complete. Automatically starting conversion to {args.format.upper()}...")
                 print("="*40 + "\n")
-                await perform_convert_action(output_dir, None, args.format, cleanup=True)
+                await perform_convert_action(output_dir, None, args.format, cleanup=not args.keep)
                 
         except Exception as e:
             logging.error(f"Download error: {e}", exc_info=False); sys.exit(1)
