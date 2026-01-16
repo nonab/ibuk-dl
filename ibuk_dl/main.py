@@ -295,7 +295,7 @@ async def convert_single_page(semaphore, browser, input_path, temp_dir, style_co
             return pdf_path
 
         except Exception as e:
-            print(f"  - ❌ Error converting {os.path.basename(input_path)}: {e}")
+            print(f"  - Error converting {os.path.basename(input_path)}: {e}")
             if page:
                 try:
                     await page.close()
@@ -433,6 +433,19 @@ async def perform_convert_action(source_dir: str, output_file: str | None, forma
         
         logging.info(f"Successfully created {output_file}")
     
+    cover_src = os.path.join(source_dir, "cover.jpg")
+    if os.path.exists(cover_src):
+        output_dir_path = os.path.dirname(os.path.abspath(output_file))
+        output_basename = os.path.splitext(os.path.basename(output_file))[0]
+        cover_dst = os.path.join(output_dir_path, f"{output_basename}.jpg")
+        
+        if os.path.abspath(cover_src) != os.path.abspath(cover_dst):
+             try:
+                 shutil.copy2(cover_src, cover_dst)
+                 logging.info(f"Saved cover image to: {cover_dst}")
+             except Exception as e:
+                 logging.warning(f"Could not save cover image: {e}")
+
     if cleanup:
         abs_source = os.path.abspath(source_dir)
         abs_output = os.path.abspath(output_file)
@@ -454,11 +467,11 @@ async def perform_convert_action(source_dir: str, output_file: str | None, forma
 def perform_query_action(url: str, ibs: IbukWebSession):
     logging.info("Action: Query Book Metadata")
     book_metadata = ibs.get_book_metadata(url)
-    print("-" * 20);
-    print(f"Author:      {book_metadata.author}");
-    print(f"Title:       {book_metadata.title}");
-    print(f"Description: {book_metadata.description}");
-    print(f"Cover URL:   {book_metadata.cover_url}");
+    print("-" * 20)
+    print(f"Author:      {book_metadata.author}")
+    print(f"Title:       {book_metadata.title}")
+    print(f"Description: {book_metadata.description}")
+    print(f"Cover URL:   {book_metadata.cover_url}")
     print("-" * 20)
 
 async def main():
